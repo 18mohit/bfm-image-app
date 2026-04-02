@@ -1,5 +1,5 @@
 "use client";
-// Daily Orders Dashboard - Using MongoDB Data API
+
 import { useState, useEffect, useCallback } from "react";
 import { FileUpload } from "@/components/file-upload";
 import { OrdersGrid } from "@/components/orders-grid";
@@ -9,12 +9,6 @@ import Link from "next/link";
 import type { OrderItem, ProductWithImage } from "@/lib/types";
 
 const TWELVE_HOURS = 12 * 60 * 60 * 1000;
-const STORAGE_KEY = "daily-orders-data";
-
-interface StoredData {
-  items: OrderItem[];
-  uploadedAt: number;
-}
 
 export default function DailyOrdersPage() {
   const [products, setProducts] = useState<ProductWithImage[]>([]);
@@ -23,12 +17,15 @@ export default function DailyOrdersPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // ✅ Fetch images from DB
   const fetchProductImages = useCallback(
     async (items: OrderItem[]): Promise<ProductWithImage[]> => {
       try {
         const skus = items.map((item) => item.sku).join(",");
-        const response = await fetch(`/api/products?skus=${encodeURIComponent(skus)}`);
-        
+        const response = await fetch(
+          `/api/products?skus=${encodeURIComponent(skus)}`
+        );
+
         if (!response.ok) {
           throw new Error("Failed to fetch product images");
         }
@@ -40,54 +37,56 @@ export default function DailyOrdersPage() {
           imageUrl: skuImageMap[item.sku.toUpperCase()] || null,
         }));
       } catch (err) {
-        console.error("Error fetching product images:", err);
-        setError("Could not load images. Check your database connection.");
+        console.error(err);
+        setError("Could not load images.");
         return items.map((item) => ({ ...item, imageUrl: null }));
       }
     },
     []
   );
 
-  const loadStoredData = useCallback(async () => {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      try {
-        const data: StoredData = JSON.parse(stored);
-        const elapsed = Date.now() - data.uploadedAt;
+  // ✅ LOAD DATA FROM DATABASE (IMPORTANT)
+  const loadOrdersFromDB = useCallback(async () => {
+    try {
+      setIsRefreshing(true);
 
-        if (elapsed < TWELVE_HOURS) {
-          setIsRefreshing(true);
-          const productsWithImages = await fetchProductImages(data.items);
-          setProducts(productsWithImages);
-          setUploadedAt(data.uploadedAt);
-          setIsRefreshing(false);
-        } else {
-          localStorage.removeItem(STORAGE_KEY);
-        }
-      } catch {
-        localStorage.removeItem(STORAGE_KEY);
+      const res = await fetch("/api/orders");
+      const data = await res.json();
+
+      if (data?.items) {
+        const productsWithImages = await fetchProductImages(data.items);
+        setProducts(productsWithImages);
+        setUploadedAt(data.uploadedAt);
       }
+
+      setIsRefreshing(false);
+    } catch (err) {
+      console.error(err);
+      setIsRefreshing(false);
     }
   }, [fetchProductImages]);
 
   useEffect(() => {
-    loadStoredData();
-  }, [loadStoredData]);
+    loadOrdersFromDB();
+  }, [loadOrdersFromDB]);
 
+  // ✅ AUTO CLEAR AFTER 12 HOURS
   useEffect(() => {
     if (uploadedAt) {
       const timeLeft = uploadedAt + TWELVE_HOURS - Date.now();
+
       if (timeLeft > 0) {
         const timer = setTimeout(() => {
           setProducts([]);
           setUploadedAt(null);
-          localStorage.removeItem(STORAGE_KEY);
         }, timeLeft);
+
         return () => clearTimeout(timer);
       }
     }
   }, [uploadedAt]);
 
+  // ✅ UPLOAD FILE
   const handleFileUpload = async (file: File) => {
     setIsLoading(true);
     setError(null);
@@ -106,58 +105,76 @@ export default function DailyOrdersPage() {
         throw new Error(errorData.error || "Failed to parse file");
       }
 
-      const { items, uploadedAt: timestamp } = await parseResponse.json();
+      // ✅ GET DATA FROM PARSER
+      const { items, uploadedAt } = await parseResponse.json();
 
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({ items, uploadedAt: timestamp })
-      );
+      // ✅ SAVE TO DATABASE (MAIN FIX 🔥)
+      await fetch("/api/orders", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ items, uploadedAt }),
+      });
 
+      // ✅ FETCH IMAGES
       const productsWithImages = await fetchProductImages(items);
+
       setProducts(productsWithImages);
-      setUploadedAt(timestamp);
+      setUploadedAt(uploadedAt);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to process file");
+      setError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setIsLoading(false);
     }
   };
 
+  // ✅ REFRESH
   const handleRefresh = async () => {
     if (products.length === 0) return;
 
     setIsRefreshing(true);
-    setError(null);
+
     try {
-      const items = products.map(({ sku, quantity }) => ({ sku, quantity }));
-      const refreshedProducts = await fetchProductImages(items);
-      setProducts(refreshedProducts);
+      const items = products.map(({ sku, quantity }) => ({
+        sku,
+        quantity,
+      }));
+
+      const refreshed = await fetchProductImages(items);
+      setProducts(refreshed);
     } catch (err) {
-      console.error("Refresh error:", err);
+      console.error(err);
     } finally {
       setIsRefreshing(false);
     }
   };
 
-  const handleClear = () => {
-    setProducts([]);
-    setUploadedAt(null);
-    setError(null);
-    localStorage.removeItem(STORAGE_KEY);
-  };
+  // ✅ CLEAR UI ONLY
+const handleClear = async () => {
+  setProducts([]);
+  setUploadedAt(null);
+  setError(null);
+
+  // 🔥 delete from DB
+  await fetch("/api/orders", {
+    method: "DELETE",
+  });
+};
 
   return (
     <main className="min-h-screen bg-background">
       <div className="max-w-7xl mx-auto px-4 py-8">
         <header className="mb-8 flex items-start justify-between">
           <div>
-            <h1 className="text-4xl font-bold text-foreground mb-2 text-balance">
+            <h1 className="text-4xl font-bold mb-2">
               Daily Orders Dashboard
             </h1>
             <p className="text-muted-foreground">
               Upload your order CSV to view products with images
             </p>
           </div>
+
           <Link href="/admin">
             <Button variant="outline">
               <Settings className="h-4 w-4 mr-2" />
@@ -171,34 +188,29 @@ export default function DailyOrdersPage() {
         </div>
 
         {error && (
-          <div className="mb-6 p-4 bg-destructive/10 border border-destructive/20 rounded-lg text-destructive">
+          <div className="mb-6 p-4 bg-red-100 border rounded">
             {error}
           </div>
         )}
 
         {isRefreshing && (
-          <div className="mb-6 flex items-center justify-center gap-2 text-muted-foreground">
+          <div className="mb-6 flex items-center justify-center gap-2">
             <RefreshCw className="h-4 w-4 animate-spin" />
-            <span>Loading images...</span>
+            Loading...
           </div>
         )}
 
         {products.length > 0 && uploadedAt && (
           <>
             <div className="flex gap-2 mb-6">
-              <Button
-                variant="outline"
-                onClick={handleRefresh}
-                disabled={isRefreshing}
-              >
-                <RefreshCw
-                  className={`h-4 w-4 mr-2 ${isRefreshing ? "animate-spin" : ""}`}
-                />
-                Refresh Images
+              <Button variant="outline" onClick={handleRefresh}>
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Refresh
               </Button>
+
               <Button variant="outline" onClick={handleClear}>
                 <Trash2 className="h-4 w-4 mr-2" />
-                Clear Orders
+                Clear
               </Button>
             </div>
 
@@ -209,15 +221,9 @@ export default function DailyOrdersPage() {
           </>
         )}
 
-        {!isLoading && !isRefreshing && products.length === 0 && (
+        {products.length === 0 && !isLoading && (
           <div className="text-center py-12 text-muted-foreground">
-            <p>No orders loaded. Upload a CSV file to get started.</p>
-            <p className="mt-2 text-sm">
-              First, add your products and image URLs in the{" "}
-              <Link href="/admin" className="underline hover:text-foreground">
-                Product Manager
-              </Link>
-            </p>
+            No orders loaded.
           </div>
         )}
       </div>
