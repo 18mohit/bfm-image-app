@@ -15,3 +15,9 @@ export interface OrderData {
   items: ProductWithImage[];
   uploadedAt: number;
 }
+
+// Monthly aggregate
+export type MonthlyProduct = ProductWithImage;
+export interface MonthlyData {
+  items: MonthlyProduct[];
+}

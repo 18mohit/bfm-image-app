@@ -3,19 +3,22 @@
 import { useState, useEffect, useCallback } from "react";
 import { FileUpload } from "@/components/file-upload";
 import { OrdersGrid } from "@/components/orders-grid";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { RefreshCw, Trash2, Settings } from "lucide-react";
 import Link from "next/link";
-import type { OrderItem, ProductWithImage } from "@/lib/types";
+import type { OrderItem, ProductWithImage, MonthlyData } from "@/lib/types";
 
 const TWELVE_HOURS = 12 * 60 * 60 * 1000;
 
-export default function DailyOrdersPage() {
-  const [products, setProducts] = useState<ProductWithImage[]>([]);
+export default function OrdersPage() {
+  const [dailyProducts, setDailyProducts] = useState<ProductWithImage[]>([]);
+  const [monthlyProducts, setMonthlyProducts] = useState<ProductWithImage[]>([]);
   const [uploadedAt, setUploadedAt] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState("daily");
 
   // ✅ Fetch images from DB
   const fetchProductImages = useCallback(
@@ -45,48 +48,54 @@ export default function DailyOrdersPage() {
     []
   );
 
-  // ✅ LOAD DATA FROM DATABASE (IMPORTANT)
-  const loadOrdersFromDB = useCallback(async () => {
+  // ✅ LOAD DAILY FROM DATABASE
+  const loadDailyOrders = useCallback(async () => {
     try {
-      setIsRefreshing(true);
-
       const res = await fetch("/api/orders");
       const data = await res.json();
 
-      if (data?.items) {
-        const productsWithImages = await fetchProductImages(data.items);
-        setProducts(productsWithImages);
+      if (data?.items && data.uploadedAt) {
+        const productsWithImages = await fetchProductImages(data.items as OrderItem[]);
+        setDailyProducts(productsWithImages);
         setUploadedAt(data.uploadedAt);
+      } else {
+        setDailyProducts([]);
+        setUploadedAt(null);
       }
-
-      setIsRefreshing(false);
     } catch (err) {
       console.error(err);
-      setIsRefreshing(false);
     }
   }, [fetchProductImages]);
 
-  useEffect(() => {
-    loadOrdersFromDB();
-  }, [loadOrdersFromDB]);
+  // ✅ LOAD MONTHLY FROM DATABASE
+  const loadMonthlyOrders = useCallback(async () => {
+    try {
+      const res = await fetch("/api/orders?monthly=true");
+      const data = await res.json() as MonthlyData;
 
-  // ✅ AUTO CLEAR AFTER 12 HOURS
-  useEffect(() => {
-    if (uploadedAt) {
-      const timeLeft = uploadedAt + TWELVE_HOURS - Date.now();
-
-      if (timeLeft > 0) {
-        const timer = setTimeout(() => {
-          setProducts([]);
-          setUploadedAt(null);
-        }, timeLeft);
-
-        return () => clearTimeout(timer);
+      if (data?.items && data.items.length > 0) {
+        const productsWithImages = await fetchProductImages(data.items as OrderItem[]);
+        setMonthlyProducts(productsWithImages);
+      } else {
+        setMonthlyProducts([]);
       }
+    } catch (err) {
+      console.error(err);
     }
-  }, [uploadedAt]);
+  }, [fetchProductImages]);
 
-  // ✅ UPLOAD FILE
+  // Load both on mount/refresh
+  const loadAllOrders = useCallback(async () => {
+    setIsRefreshing(true);
+    await Promise.all([loadDailyOrders(), loadMonthlyOrders()]);
+    setIsRefreshing(false);
+  }, [loadDailyOrders, loadMonthlyOrders]);
+
+  useEffect(() => {
+    loadAllOrders();
+  }, [loadAllOrders]);
+
+  // ✅ UPLOAD FILE (reload both)
   const handleFileUpload = async (file: File) => {
     setIsLoading(true);
     setError(null);
@@ -105,23 +114,15 @@ export default function DailyOrdersPage() {
         throw new Error(errorData.error || "Failed to parse file");
       }
 
-      // ✅ GET DATA FROM PARSER
       const { items, uploadedAt } = await parseResponse.json();
 
-      // ✅ SAVE TO DATABASE (MAIN FIX 🔥)
       await fetch("/api/orders", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items, uploadedAt }),
       });
 
-      // ✅ FETCH IMAGES
-      const productsWithImages = await fetchProductImages(items);
-
-      setProducts(productsWithImages);
-      setUploadedAt(uploadedAt);
+      await loadAllOrders(); // Reload both tabs
     } catch (err) {
       setError(err instanceof Error ? err.message : "Upload failed");
     } finally {
@@ -129,52 +130,54 @@ export default function DailyOrdersPage() {
     }
   };
 
-  // ✅ REFRESH
+  // ✅ REFRESH IMAGES (both tabs)
   const handleRefresh = async () => {
-    if (products.length === 0) return;
+    if (dailyProducts.length === 0 && monthlyProducts.length === 0) return;
 
     setIsRefreshing(true);
 
-    try {
-      const items = products.map(({ sku, quantity }) => ({
-        sku,
-        quantity,
-      }));
+    const allSkus = [...new Set([
+      ...dailyProducts.map(p => p.sku),
+      ...monthlyProducts.map(p => p.sku)
+    ])];
 
-      const refreshed = await fetchProductImages(items);
-      setProducts(refreshed);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsRefreshing(false);
+    if (allSkus.length > 0) {
+      const items = allSkus.map(sku => ({ sku, quantity: 0 } as OrderItem));
+      const refreshedImages = await fetchProductImages(items);
+      // Update both with new images
+      setDailyProducts(dailyProducts.map(p => 
+        refreshedImages.find(r => r.sku === p.sku)?.imageUrl !== undefined 
+          ? { ...p, imageUrl: refreshedImages.find(r => r.sku === p.sku)?.imageUrl }
+          : p
+      ));
+      setMonthlyProducts(monthlyProducts.map(p => 
+        refreshedImages.find(r => r.sku === p.sku)?.imageUrl !== undefined 
+          ? { ...p, imageUrl: refreshedImages.find(r => r.sku === p.sku)?.imageUrl }
+          : p
+      ));
     }
+
+    setIsRefreshing(false);
   };
 
-  // ✅ CLEAR UI ONLY
-const handleClear = async () => {
-  setProducts([]);
-  setUploadedAt(null);
-  setError(null);
-
-  // 🔥 delete from DB
-  await fetch("/api/orders", {
-    method: "DELETE",
-  });
-};
+  // ✅ CLEAR DAILY ONLY
+  const handleClearDaily = async () => {
+    setDailyProducts([]);
+    setUploadedAt(null);
+    // API cleanup handled by GET
+    await loadAllOrders(); // Reload monthly if affected
+  };
 
   return (
     <main className="min-h-screen bg-background">
       <div className="max-w-7xl mx-auto px-4 py-8">
         <header className="mb-8 flex items-start justify-between">
           <div>
-            <h1 className="text-4xl font-bold mb-2">
-              Daily Orders Dashboard
-            </h1>
+            <h1 className="text-4xl font-bold mb-2">Orders Dashboard</h1>
             <p className="text-muted-foreground">
-              Upload your order CSV to view products with images
+              Daily uploads + monthly totals
             </p>
           </div>
-
           <Link href="/admin">
             <Button variant="outline">
               <Settings className="h-4 w-4 mr-2" />
@@ -188,8 +191,16 @@ const handleClear = async () => {
         </div>
 
         {error && (
-          <div className="mb-6 p-4 bg-red-100 border rounded">
+          <div className="mb-6 p-4 bg-red-100 border rounded-lg text-red-900">
             {error}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ml-2"
+              onClick={() => setError(null)}
+            >
+              Dismiss
+            </Button>
           </div>
         )}
 
@@ -200,30 +211,58 @@ const handleClear = async () => {
           </div>
         )}
 
-        {products.length > 0 && uploadedAt && (
+        {(dailyProducts.length > 0 || monthlyProducts.length > 0) && (
           <>
             <div className="flex gap-2 mb-6">
               <Button variant="outline" onClick={handleRefresh}>
                 <RefreshCw className="h-4 w-4 mr-2" />
-                Refresh
+                Refresh Images
               </Button>
-
-              <Button variant="outline" onClick={handleClear}>
-                <Trash2 className="h-4 w-4 mr-2" />
-                Clear
-              </Button>
+              {uploadedAt && (
+                <Button variant="outline" onClick={handleClearDaily}>
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Clear Daily
+                </Button>
+              )}
             </div>
 
-            <OrdersGrid
-              products={products}
-              expiresAt={uploadedAt + TWELVE_HOURS}
-            />
+            <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="daily">Daily Orders</TabsTrigger>
+                <TabsTrigger value="monthly">This Month Total</TabsTrigger>
+              </TabsList>
+              <TabsContent value="daily" className="mt-6">
+                {dailyProducts.length > 0 ? (
+                  <OrdersGrid
+                    products={dailyProducts}
+                    expiresAt={uploadedAt ? uploadedAt + TWELVE_HOURS : undefined}
+                    title="Daily Orders"
+                  />
+                ) : (
+                  <div className="text-center py-12 text-muted-foreground">
+                    No daily orders. Upload a file.
+                  </div>
+                )}
+              </TabsContent>
+              <TabsContent value="monthly" className="mt-6">
+                {monthlyProducts.length > 0 ? (
+                  <OrdersGrid
+                    products={monthlyProducts}
+                    title="This Month Total"
+                  />
+                ) : (
+                  <div className="text-center py-12 text-muted-foreground">
+                    No monthly data yet.
+                  </div>
+                )}
+              </TabsContent>
+            </Tabs>
           </>
         )}
 
-        {products.length === 0 && !isLoading && (
+        {dailyProducts.length === 0 && monthlyProducts.length === 0 && !isLoading && (
           <div className="text-center py-12 text-muted-foreground">
-            No orders loaded.
+            No orders loaded. Upload your first CSV.
           </div>
         )}
       </div>
