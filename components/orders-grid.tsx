@@ -7,16 +7,19 @@ interface OrdersGridProps {
   products: ProductWithImage[];
   expiresAt?: number;
   title?: string;
+  /** Human-readable time until the monthly data resets (e.g. "12d 4h") */
+  monthlyResetIn?: string;
 }
 
 export function OrdersGrid({
   products,
   expiresAt,
   title = "Orders",
+  monthlyResetIn,
 }: OrdersGridProps) {
   const totalQuantity = products.reduce(
     (sum, product) => sum + product.quantity,
-    0,
+    0
   );
 
   return (
@@ -25,21 +28,26 @@ export function OrdersGrid({
         <h2 className="text-2xl font-bold">
           {title} ({totalQuantity} total)
         </h2>
-        {expiresAt && (
-          <>
-            {(() => {
-              const timeLeft = Math.max(0, expiresAt - Date.now());
-              const hoursLeft = Math.floor(timeLeft / (1000 * 60 * 60));
-              const minutesLeft = Math.floor(
-                (timeLeft % (1000 * 60 * 60)) / (1000 * 60),
-              );
-              return (
-                <div className="text-sm text-muted-foreground">
-                  Auto-clears in {hoursLeft}h {minutesLeft}m
-                </div>
-              );
-            })()}
-          </>
+
+        {/* Daily: countdown to 12-hour expiry */}
+        {expiresAt && (() => {
+          const timeLeft = Math.max(0, expiresAt - Date.now());
+          const hoursLeft = Math.floor(timeLeft / (1000 * 60 * 60));
+          const minutesLeft = Math.floor(
+            (timeLeft % (1000 * 60 * 60)) / (1000 * 60)
+          );
+          return (
+            <div className="text-sm text-muted-foreground">
+              Auto-clears in {hoursLeft}h {minutesLeft}m
+            </div>
+          );
+        })()}
+
+        {/* Monthly: countdown to 1st of next month */}
+        {monthlyResetIn && !expiresAt && (
+          <div className="text-sm text-muted-foreground">
+            Resets on the 1st &mdash; {monthlyResetIn} left
+          </div>
         )}
       </div>
 
